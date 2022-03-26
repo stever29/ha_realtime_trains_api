@@ -22,6 +22,7 @@ import homeassistant.util.dt as dt_util
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOFFSET = timedelta(minutes=0)
+DEFAULT_DELAY = 4
 
 ATTR_ATCOCODE = "atcocode"
 ATTR_LOCALITY = "locality"
@@ -41,9 +42,11 @@ CONF_JOURNEYDATA = "journey_data_for_next_X_trains"
 CONF_SENSORNAME = "sensor_name"
 CONF_TIMEOFFSET = "time_offset"
 CONF_STOPS_OF_INTEREST = "stops_of_interest"
+CONF_CONSIDERED_DELAY = "considered_delay_mins"
 
 TIMEZONE = pytz.timezone('Europe/London')
 STRFFORMAT = "%d-%m-%Y %H:%M"
+STRFFORMAT_HHMM = "%H:%M"
 
 _QUERY_SCHEME = vol.Schema(
     {
@@ -54,6 +57,7 @@ _QUERY_SCHEME = vol.Schema(
         vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET): 
             vol.All(cv.time_period, cv.positive_timedelta),
         vol.Optional(CONF_STOPS_OF_INTEREST): [cv.string],
+        vol.Optional(CONF_CONSIDERED_DELAY, default=DEFAULT_DELAY): cv.positive_int,
     }
 )
 
@@ -88,8 +92,9 @@ async def async_setup_platform(
         sensor_name = query.get(CONF_SENSORNAME, None)
         journey_start = query.get(CONF_START)
         journey_end = query.get(CONF_END)
-        journey_data_for_next_X_trains = query.get(CONF_JOURNEYDATA)
+        journey_data_for_next_X_trains = query.get(CONF_JOURNEYDATA, 0)
         timeoffset = query.get(CONF_TIMEOFFSET)
+        considered_delay_mins = query.get(CONF_CONSIDERED_DELAY, DEFAULT_DELAY)
         stops_of_interest = query.get(CONF_STOPS_OF_INTEREST, [])
         sensor = RealtimeTrainLiveTrainTimeSensor(
                 sensor_name,
@@ -101,6 +106,7 @@ async def async_setup_platform(
                 timeoffset,
                 autoadjustscans,
                 stops_of_interest,
+                considered_delay_mins,
                 interval,
                 client
             )
@@ -125,7 +131,8 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
     _attr_native_unit_of_measurement = TIME_MINUTES
 
     def __init__(self, sensor_name, username, password, journey_start, journey_end,
-                journey_data_for_next_X_trains, timeoffset, autoadjustscans, stops_of_interest, interval, client):
+                journey_data_for_next_X_trains, timeoffset, autoadjustscans, stops_of_interest,
+                considered_delay_mins, interval, client):
         """Construct a live train time sensor."""
 
         default_sensor_name = (
@@ -142,6 +149,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         self._timeoffset = timeoffset
         self._autoadjustscans = autoadjustscans
         self._stops_of_interest = stops_of_interest
+        self._considered_delay_mins = considered_delay_mins
         self._interval = interval
         self._client = client
 
@@ -168,14 +176,14 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             departuredate = TIMEZONE.localize(datetime.fromisoformat(departure["runDate"]))
             
             scheduled = _to_colonseparatedtime(departure["locationDetail"]["gbttBookedDeparture"])
-            scheduledTs = _timestamp(scheduled, departuredate)
-            
-            if _delta_secs(scheduledTs, now) < self._timeoffset.total_seconds():
-                continue
+            scheduledTs = _timestamp(scheduled, departuredate, 60) # count trains over an hour late as next day
             
             estimated = _to_colonseparatedtime(departure["locationDetail"]["realtimeDeparture"])
-            estimatedTs = _timestamp(estimated, departuredate)
+            estimatedTs = _timestamp(estimated, departuredate, 5) # 5 mins for real
             
+            if _delta_secs(estimatedTs, now) < self._timeoffset.total_seconds():
+                continue
+
             if nextDepartureEstimatedTs is None:
                 nextDepartureEstimatedTs = estimatedTs
             else:
@@ -183,16 +191,27 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 
             departureCount += 1
             
+            cancelled = departure["locationDetail"].get("cancelReasonCode", None) is not None
+            delayed = (_delta_secs(estimatedTs, scheduledTs) // 60) > self._considered_delay_mins
+            status = "ON TIME"
+            if cancelled:
+                status = "CANCELLED"
+            elif delayed:
+                status = "DELAYED"
+
             train = {
                     "origin_name": departure["locationDetail"]["origin"][0]["description"],
                     "destination_name": departure["locationDetail"]["destination"][0]["description"],
                     #"service_date": departure["runDate"],
                     "service_uid": departure["serviceUid"],
                     "scheduled": scheduledTs.strftime(STRFFORMAT),
+                    "scheduled_hhmm": scheduledTs.strftime(STRFFORMAT_HHMM),
                     "estimated": estimatedTs.strftime(STRFFORMAT),
+                    "estimated_hhmm": estimatedTs.strftime(STRFFORMAT_HHMM),
                     "minutes": _delta_secs(estimatedTs, now) // 60,
                     "platform": departure["locationDetail"].get("platform", None),
                     "operator_name": departure["atocName"],
+                    "status": status,
                 }
             if departureCount <= self._journey_data_for_next_X_trains:
                 await self._add_journey_data(train, scheduledTs, estimatedTs)
@@ -287,10 +306,11 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 def _to_colonseparatedtime(hhmm_time_str : str) -> str:
     return hhmm_time_str[:2] + ":" + hhmm_time_str[2:]
 
-def _timestamp(hhmm_time_str : str, date : datetime=None) -> datetime:
+def _timestamp(hhmm_time_str : str, date : datetime=None, historical_mins : int=0) -> datetime:
     now = cast(datetime, dt_util.now()).astimezone(TIMEZONE) if date is None else date
     hhmm_time_a = datetime.strptime(hhmm_time_str, "%H:%M")
     hhmm_datetime = now.replace(hour=hhmm_time_a.hour, minute=hhmm_time_a.minute, second=0, microsecond=0)
+    now -= timedelta(historical_mins)
     if hhmm_datetime < now:
         hhmm_datetime += timedelta(days=1)
     return hhmm_datetime
