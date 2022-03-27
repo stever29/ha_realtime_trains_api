@@ -43,6 +43,7 @@ CONF_SENSORNAME = "sensor_name"
 CONF_TIMEOFFSET = "time_offset"
 CONF_STOPS_OF_INTEREST = "stops_of_interest"
 CONF_CONSIDERED_DELAY = "considered_delay_mins"
+CONF_RETURN_EMPTY = "return_empty_train_for_no_departures"
 
 TIMEZONE = pytz.timezone('Europe/London')
 STRFFORMAT = "%d-%m-%Y %H:%M"
@@ -58,6 +59,7 @@ _QUERY_SCHEME = vol.Schema(
             vol.All(cv.time_period, cv.positive_timedelta),
         vol.Optional(CONF_STOPS_OF_INTEREST): [cv.string],
         vol.Optional(CONF_CONSIDERED_DELAY, default=DEFAULT_DELAY): cv.positive_int,
+        vol.Optional(CONF_RETURN_EMPTY, default=0): cv.positive_int,
     }
 )
 
@@ -95,6 +97,7 @@ async def async_setup_platform(
         journey_data_for_next_X_trains = query.get(CONF_JOURNEYDATA, 0)
         timeoffset = query.get(CONF_TIMEOFFSET)
         considered_delay_mins = query.get(CONF_CONSIDERED_DELAY, DEFAULT_DELAY)
+        fill_empty = query.get(CONF_RETURN_EMPTY, 0)
         stops_of_interest = query.get(CONF_STOPS_OF_INTEREST, [])
         sensor = RealtimeTrainLiveTrainTimeSensor(
                 sensor_name,
@@ -107,6 +110,7 @@ async def async_setup_platform(
                 autoadjustscans,
                 stops_of_interest,
                 considered_delay_mins,
+                fill_empty,
                 interval,
                 client
             )
@@ -132,7 +136,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 
     def __init__(self, sensor_name, username, password, journey_start, journey_end,
                 journey_data_for_next_X_trains, timeoffset, autoadjustscans, stops_of_interest,
-                considered_delay_mins, interval, client):
+                considered_delay_mins, fill_empty, interval, client):
         """Construct a live train time sensor."""
 
         default_sensor_name = (
@@ -150,6 +154,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         self._autoadjustscans = autoadjustscans
         self._stops_of_interest = stops_of_interest
         self._considered_delay_mins = considered_delay_mins
+        self._fill_empty = fill_empty
         self._interval = interval
         self._client = client
 
@@ -192,7 +197,8 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             departureCount += 1
             
             cancelled = departure["locationDetail"].get("cancelReasonCode", None) is not None
-            delayed = (_delta_secs(estimatedTs, scheduledTs) // 60) > self._considered_delay_mins
+            delay = _delta_secs(estimatedTs, scheduledTs) // 60
+            delayed = delay > self._considered_delay_mins
             status = "ON TIME"
             if cancelled:
                 status = "CANCELLED"
@@ -208,7 +214,10 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                     "scheduled_hhmm": scheduledTs.strftime(STRFFORMAT_HHMM),
                     "estimated": estimatedTs.strftime(STRFFORMAT),
                     "estimated_hhmm": estimatedTs.strftime(STRFFORMAT_HHMM),
+                    "estimated_arrival": None, # updated later if journey is queried
+                    "estimated_arrival_hhmm": "", # updated later if journey is queried
                     "minutes": _delta_secs(estimatedTs, now) // 60,
+                    "delay": delay,
                     "platform": departure["locationDetail"].get("platform", None),
                     "operator_name": departure["atocName"],
                     "status": status,
@@ -219,6 +228,23 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 
         if nextDepartureEstimatedTs is None:
             self._state = "No Departures"
+            for x in range(0, self._fill_empty):
+                train = {
+                        "origin_name": self._journey_start,
+                        "destination_name": self._journey_end,
+                        "service_uid": None,
+                        "scheduled": None,
+                        "scheduled_hhmm": "--:--",
+                        "estimated": None,
+                        "estimated_hhmm": "--:--",
+                        "scheduled_arrival_hhmm": "--:--",
+                        "estimated_arrival_hhmm": "--:--",
+                        "minutes": "-",
+                        "platform": "-",
+                        "delay": 0,
+                        "status": self._state,
+                    }
+                self._next_trains.append(train)
         else:
             self._state = _delta_secs(nextDepartureEstimatedTs, now) // 60
         
@@ -266,7 +292,9 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                         newtrain = {
                             "stops_of_interest": stopsOfInterest,
                             "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
-                            "estimate_arrival": estimated_arrival.strftime(STRFFORMAT),
+                            "scheduled_arrival_hhmm": scheduled_arrival.strftime(STRFFORMAT_HHMM),
+                            "estimated_arrival": estimated_arrival.strftime(STRFFORMAT),
+                            "estimated_arrival_hhmm": estimated_arrival.strftime(STRFFORMAT_HHMM),
                             "journey_time_mins": _delta_secs(estimated_arrival, estimated_departure) // 60,
                             "stops": stopCount
                         }
@@ -281,7 +309,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                                 "stop": stop['crs'],
                                 "name": stop['description'],
                                 "scheduled_stop": scheduled_stop.strftime(STRFFORMAT),
-                                "estimate_stop": estimated_stop.strftime(STRFFORMAT),
+                                "estimated_stop": estimated_stop.strftime(STRFFORMAT),
                                 "journey_time_mins": _delta_secs(estimated_stop, estimated_departure) // 60,
                                 "stops": stopCount
                             }
@@ -318,4 +346,3 @@ def _timestamp(hhmm_time_str : str, date : datetime=None, historical_mins : int=
 def _delta_secs(hhmm_datetime_a : datetime, hhmm_datetime_b : datetime) -> float:
     """Calculate time delta in minutes to a time in hh:mm format."""
     return (hhmm_datetime_a - hhmm_datetime_b).total_seconds()
-
