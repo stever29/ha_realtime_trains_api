@@ -228,7 +228,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 
         if nextDepartureEstimatedTs is None:
             self._state = "No Departures"
-            for x in range(0, self._fill_empty):
+            for x in range(len(self._next_trains), self._fill_empty):
                 train = {
                         "origin_name": self._journey_start,
                         "destination_name": self._journey_end,
