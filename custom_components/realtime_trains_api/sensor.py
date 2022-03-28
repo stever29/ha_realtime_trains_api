@@ -180,11 +180,13 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             
             departuredate = TIMEZONE.localize(datetime.fromisoformat(departure["runDate"]))
             
-            scheduled = _to_colonseparatedtime(departure["locationDetail"]["gbttBookedDeparture"])
-            scheduledTs = _timestamp(scheduled, departuredate, 60) # count trains over an hour late as next day
+            scheduled_raw = departure["locationDetail"]["gbttBookedDeparture"]
+            scheduled = _to_colonseparatedtime(scheduled_raw)
+            scheduledTs = _timestamp(scheduled, departuredate, 60) # count trains over an hour before now as next day
             
-            estimated = _to_colonseparatedtime(departure["locationDetail"]["realtimeDeparture"])
-            estimatedTs = _timestamp(estimated, departuredate, 5) # 5 mins for real
+            # estimated isn't always populated (e.g. far into the future, so fallback to scheduled)
+            estimated = _to_colonseparatedtime(departure["locationDetail"].get("realtimeDeparture", scheduled_raw))
+            estimatedTs = _timestamp(estimated, departuredate, 5) # 5 mins for real before considered next day
             
             if _delta_secs(estimatedTs, now) < self._timeoffset.total_seconds():
                 continue
@@ -203,7 +205,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             if cancelled:
                 status = "CANCELLED"
             elif delayed:
-                status = "DELAYED"
+                status = "LATE"
 
             train = {
                     "origin_name": departure["locationDetail"]["origin"][0]["description"],
@@ -287,8 +289,9 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                 found = False
                 for stop in data['locations']:
                     if stop['crs'] == self._journey_end:
-                        scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
-                        estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
+                        scheduled_arrival_raw = stop['gbttBookedArrival']
+                        scheduled_arrival = _timestamp(_to_colonseparatedtime(scheduled_arrival_raw), scheduled_departure)
+                        estimated_arrival = _timestamp(_to_colonseparatedtime(stop.get('realtimeArrival',scheduled_arrival_raw)), scheduled_departure)
                         newtrain = {
                             "stops_of_interest": stopsOfInterest,
                             "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
@@ -302,8 +305,9 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                         found = True
                         break
                     elif stop['crs'] in self._stops_of_interest and stop['isPublicCall']:
-                        scheduled_stop = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
-                        estimated_stop = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
+                        scheduled_arrival_raw = stop['gbttBookedArrival']
+                        scheduled_stop = _timestamp(_to_colonseparatedtime(scheduled_arrival_raw), scheduled_departure)
+                        estimated_stop = _timestamp(_to_colonseparatedtime(stop.get('realtimeArrival',scheduled_arrival_raw)), scheduled_departure)
                         stopsOfInterest.append(
                             {
                                 "stop": stop['crs'],
