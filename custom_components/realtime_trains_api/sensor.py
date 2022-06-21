@@ -210,7 +210,6 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             train = {
                     "origin_name": departure["locationDetail"]["origin"][0]["description"],
                     "destination_name": departure["locationDetail"]["destination"][0]["description"],
-                    #"service_date": departure["runDate"],
                     "service_uid": departure["serviceUid"],
                     "scheduled": scheduledTs.strftime(STRFFORMAT),
                     "scheduled_hhmm": scheduledTs.strftime(STRFFORMAT_HHMM),
@@ -227,26 +226,27 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             if departureCount <= self._journey_data_for_next_X_trains:
                 await self._add_journey_data(train, scheduledTs, estimatedTs)
             self._next_trains.append(train)
+            
+        for x in range(len(self._next_trains), self._fill_empty):
+            train = {
+                    "origin_name": self._journey_start,
+                    "destination_name": self._journey_end,
+                    "service_uid": None,
+                    "scheduled": None,
+                    "scheduled_hhmm": "--:--",
+                    "estimated": None,
+                    "estimated_hhmm": "--:--",
+                    "scheduled_arrival_hhmm": "--:--",
+                    "estimated_arrival_hhmm": "--:--",
+                    "minutes": "-",
+                    "platform": "-",
+                    "delay": 0,
+                    "status": "",
+                }
+            self._next_trains.append(train)
 
         if nextDepartureEstimatedTs is None:
             self._state = "No Departures"
-            for x in range(len(self._next_trains), self._fill_empty):
-                train = {
-                        "origin_name": self._journey_start,
-                        "destination_name": self._journey_end,
-                        "service_uid": None,
-                        "scheduled": None,
-                        "scheduled_hhmm": "--:--",
-                        "estimated": None,
-                        "estimated_hhmm": "--:--",
-                        "scheduled_arrival_hhmm": "--:--",
-                        "estimated_arrival_hhmm": "--:--",
-                        "minutes": "-",
-                        "platform": "-",
-                        "delay": 0,
-                        "status": self._state,
-                    }
-                self._next_trains.append(train)
         else:
             self._state = _delta_secs(nextDepartureEstimatedTs, now) // 60
         
