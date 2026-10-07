@@ -1,5 +1,5 @@
 # realtime_trains_api
-api.rtt.io Home Assistant integration
+Realtime Trains (data.rtt.io) Home Assistant integration
 
 It provides detailed live train departures and journey stats:
 
@@ -10,6 +10,7 @@ next_trains:
   - origin_name: London Waterloo
     destination_name: Basingstoke
     service_uid: Q46478
+    unique_identity: gb-nr:Q46478:2022-01-21
     scheduled: 21-01-2022 20:12
     estimated: 21-01-2022 20:12
     minutes: 3
@@ -44,43 +45,63 @@ icon: mdi:train
 friendly_name: Next Waterloo train data
 ```
 
-This Home Assistant integration is only made possible by the brilliant Realtime Trains API (https://api.rtt.io also see https://www.realtimetrains.co.uk) which is maintained by Tom Cairns under swlines Ltd (https://twitter.com/swlines).
+This Home Assistant integration is only made possible by the brilliant Realtime Trains API (https://data.rtt.io, sign up at https://api-portal.rtt.io; also see https://www.realtimetrains.co.uk) which is maintained by Tom Cairns under swlines Ltd (https://twitter.com/swlines).
 
-Alternatively, you can use the built-in `uk_transport` integration (see https://www.home-assistant.io/integrations/uk_transport/).  NOTE: Unlike this `realtime_trains_api` integration, `uk_transport` cannot provide additional journey details such as stops, journey durations and arrival times.
+Alternatively, you can use the built-in `uk_transport` integration (see https://www.home-assistant.io/integrations/uk_transport/).  NOTE: Unlike this `realtime_trains_api` integration, `uk_tr# Guide
 
-# Guide
+## Version 2.0: new Realtime Trains API
+
+The original API at api.rtt.io was switched off at the end of September 2026. Version 2.0 uses the new API at https://data.rtt.io:
+
+- Authentication is a bearer token from https://api-portal.rtt.io instead of a username and password. The portal gives you either a **refresh token** (the default here; the integration exchanges it for short-lived access tokens itself) or a long-life **access token** (set `token_type: access`).
+- The new API is rate limited per account (for example 10/minute, 100/hour, 1,000/day, 10,000/week). Check yours in the `X-RateLimit-*` response headers. Use `poll_windows` so the API is only polled often when you need it.
+- Sensor names, entity IDs and the `next_trains` attributes are unchanged, so existing templates and dashboards keep working. New attributes: `unique_identity` on each train, plus `last_polled` and `last_error` on the sensor.
 
 ## Installation & Usage
 
-1. Signup to https://api.rtt.io
-2. Add repository to HACS (see https://hacs.xyz/docs/faq/custom_repositories) - use "https://github.com/megakid/ha_realtime_trains_api" as the repository URL.
-3. Install the `realtime_trains_api` integration inside HACS
-5. To your HA `configuration.yaml`, add the following:
+1. Sign up at https://api-portal.rtt.io and copy your token into `secrets.yaml` as `rtt_token`.
+2. Copy `custom_components/realtime_trains_api` into your Home Assistant `config/custom_components/` folder (or add this repository to HACS as a custom repository).
+3. Add to `configuration.yaml`:
 ```yaml
 sensor:
   - platform: realtime_trains_api
-    username: '[Your RTT API Auth Credentials username]'
-    password: '[Your RTT API Auth Credentials password]' # (recommended to use '!secret my_rtt_password' and add to secrets.yaml)
-    scan_interval:
-      seconds: 90 # this defaults to 60 seconds (in HA) so you can change this.  Dont set it too frequent or you might get blocked for abuse of the RTT API.
+    token: !secret rtt_token
+    # token_type: access          # only if the portal gave you a long-life access token
+    scan_interval: 60             # how often HA checks; the API is only called when a query is due (see below)
+    auto_adjust_scans: true       # if a query finds no trains, wait idle_scan_interval before asking again
     queries:
-      - origin: WAL
-        destination: WAT
-        # journey_data_for_next_X_trains is optional but highly recommended, 
-        # Defaults to 0. 
-        # Entering 5 here means the first 5 departures from the origin 
-        # (WAL in this case) to destination (WAT in this case) will hit 
-        # the API to lookup the number of stops, journey time and estimated
-        # arrival time to the destination (WAT in this case).
-        journey_data_for_next_X_trains: 5 
-        auto_adjust_scans: true # If no depatures are retrieved, back off polling interval to 30 mins (until there are some trains)
+      - origin: WIC
+        destination: LST
+        sensor_name: Next Train To Liv Street
+        journey_data_for_next_X_trains: 2   # arrival times for the next 2 trains (one extra API call each, cached for 5 minutes)
+        return_empty_train_for_no_departures: 3
+        considered_delay_mins: 4            # later than this counts as LATE
+        time_window_mins: 120               # how far ahead to list trains (falls back to 60 if your token doesn't allow it)
+        active_scan_interval:
+          minutes: 2                        # poll every 2 minutes inside poll_windows...
+        idle_scan_interval:
+          minutes: 30                       # ...and every 30 minutes outside them (default)
+        poll_windows:
+          - start: "06:30"
+            end: "09:30"
+            days: [mon, tue, wed, thu, fri] # default: every day
         stops_of_interest:
-          - VXH # a stop_of_interest will add data about this stop to each train's data (only if journey_data is gathered for that journey).  Means you can add more context to the train journey (e.g. my commute can start at two stops for some trains, only one for others meaning it might change my choice of train if I can get on at VXH instead of WAT)
-      - origin: WAT
-        destination: WAL
-        sensor_name: My Custom Journey # this will appear as 'sensor.my_custom_journey'
+          - SNF
+      - origin: LST
+        destination: WIC
+        sensor_name: Next Train Home
         time_offset:
-          minutes: 20 # This will display departures from now+20 minutes - useful if the station is 20 minutes travel/walk away.
+          minutes: 10                       # only show trains leaving at least 10 minutes from now
+        active_scan_interval:
+          minutes: 2
+        poll_windows:
+          - start: "16:30"
+            end: "22:30"
+            days: [mon, tue, wed, thu, fri]
 ```
-6. Restart HA
-7. Your `sensor` will be named something like `sensor.next_train_from_wal_to_wat` (unless you specified a `sensor_name`) for each query you defined in your configuration.
+4. Restart Home Assistant.
+5. Each query creates a sensor named like `sensor.next_train_from_wic_to_lst` (or from `sensor_name`).
+
+Queries with the same origin, destination and `time_window_mins` share one API call, so several sensors on one route (for example with different `time_offset`s) cost no more than one. Without `poll_windows`, a query polls every `active_scan_interval` (default: `scan_interval`) all day.
+
+If the API returns `429 Too Many Requests`, all sensors stop calling it until the `Retry-After` time has passed, and keep showing their last data in the meantime.
